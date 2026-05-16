@@ -69,7 +69,7 @@ jobs:
     
     - name: Deploy Cloud Function
       run: |
-        cd sharepoint-integration/gcp
+        cd gcp
         cp main_test.py main.py
         
         gcloud functions deploy ${{ env.FUNCTION_NAME }} \
