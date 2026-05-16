@@ -74,7 +74,7 @@ jobs:
         
         gcloud functions deploy ${{ env.FUNCTION_NAME }} \
           --gen2 \
-          --runtime=python39 \
+          --runtime=python311 \
           --region=${{ env.REGION }} \
           --source=. \
           --entry-point=process_sharepoint_compliance_test \
