@@ -73,7 +73,6 @@ jobs:
         cp main_test.py main.py
         
         gcloud functions deploy ${{ env.FUNCTION_NAME }} \
-          --gen2 \
           --runtime=python311 \
           --region=${{ env.REGION }} \
           --source=. \
@@ -82,11 +81,12 @@ jobs:
           --allow-unauthenticated \
           --timeout=540s \
           --memory=1024MiB \
+          --service-account="${{ env.FUNCTION_NAME }}@${{ env.PROJECT_ID }}.iam.gserviceaccount.com" \
           --set-env-vars="GCP_PROJECT=${{ env.PROJECT_ID }},GCS_BUCKET=${{ env.BUCKET_NAME }},SECRET_PREFIX=sharepoint-compliance,USE_SEED_DATA=true"
     
     - name: Get Function URL
       run: |
-        FUNCTION_URL=$(gcloud functions describe ${{ env.FUNCTION_NAME }} --gen2 --region=${{ env.REGION }} --format='value(serviceConfig.uri)')
+        FUNCTION_URL=$(gcloud functions describe ${{ env.FUNCTION_NAME }} --region=${{ env.REGION }} --format='value(httpsTrigger.url)')
         echo "🎉 Deployment Complete!"
         echo "Function URL: $FUNCTION_URL"
         echo ""
