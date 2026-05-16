@@ -6,7 +6,7 @@ on:
 env:
   PROJECT_ID: pmops-docai-dev-e93d
   REGION: us-central1
-  FUNCTION_NAME: sharepoint-compliance-processor-test
+  FUNCTION_NAME: sharepoint-compliance-gen1
   BUCKET_NAME: product-compliance-data-pmops-docai-dev-e93d
 
 jobs:
