@@ -34,6 +34,7 @@ env:
   FUNCTION_NAME: sharepoint-compliance-processor-test
   BUCKET_NAME: product-compliance-data-pmops-docai-dev-e93d
   USE_SEED_DATA: ${{ github.event.inputs.use_seed_data || 'true' }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   test:

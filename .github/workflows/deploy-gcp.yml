@@ -23,15 +23,16 @@ env:
   REGION: us-central1
   FUNCTION_NAME: sharepoint-compliance-processor
   BUCKET_NAME: product-compliance-data-pmops-docai-dev-e93d
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.9'
     
@@ -51,7 +52,7 @@ jobs:
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     
     - name: Authenticate to GCP
       uses: google-github-actions/auth@v0
