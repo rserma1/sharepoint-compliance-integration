@@ -1,0 +1,178 @@
+# Monitoring and Alerting Configuration for SharePoint Compliance Integration
+
+# Cloud Monitoring Dashboard
+apiVersion: monitoring/v1
+kind: Dashboard
+metadata:
+  name: sharepoint-compliance-dashboard
+  labels:
+    app: sharepoint-compliance
+spec:
+  displayName: "SharePoint Compliance Processing"
+  gridLayout:
+    columns: "2"
+    widgets:
+      - title: "Processing Status"
+        xyChart:
+          dataSets:
+            - timeSeriesQuery:
+                prometheusQueryLanguage:
+                  query: 'cloudfunctions_function_execution_count{function_name="sharepoint-compliance-processor"}'
+            plotType: LINE
+            legend: "Execution Count"
+          timeshiftDuration: 0s
+          xAxis:
+            scale: LINEAR
+          yAxis:
+            scale: LINEAR
+            label: "Count"
+      
+      - title: "Success Rate"
+        scorecard:
+          dataSets:
+            - timeSeriesQuery:
+                prometheusQueryLanguage:
+                  query: 'rate(cloudfunctions_function_execution_count{function_name="sharepoint-compliance-processor",status="success"}[5m]) / rate(cloudfunctions_function_execution_count{function_name="sharepoint-compliance-processor"}[5m]) * 100'
+          gaugeView:
+            lowerBound: 0
+            upperBound: 100
+            thresholds:
+              - value: 95
+                color: GREEN
+              - value: 80
+                color: YELLOW
+              - value: 0
+                color: RED
+      
+      - title: "Processing Duration"
+        xyChart:
+          dataSets:
+            - timeSeriesQuery:
+                prometheusQueryLanguage:
+                  query: 'cloudfunctions_function_execution_duration_ms{function_name="sharepoint-compliance-processor"}'
+            plotType: LINE
+          timeshiftDuration: 0s
+          xAxis:
+            scale: LINEAR
+          yAxis:
+            scale: LINEAR
+            label: "Duration (ms)"
+      
+      - title: "Error Rate"
+        xyChart:
+          dataSets:
+            - timeSeriesQuery:
+                prometheusQueryLanguage:
+                  query: 'rate(cloudfunctions_function_execution_count{function_name="sharepoint-compliance-processor",status="error"}[5m])'
+            plotType: LINE
+          timeshiftDuration: 0s
+          xAxis:
+            scale: LINEAR
+          yAxis:
+            scale: LINEAR
+            label: "Errors per second"
+
+---
+# Alert Policies
+apiVersion: monitoring/v3
+kind: AlertPolicy
+metadata:
+  name: sharepoint-compliance-alerts
+  labels:
+    app: sharepoint-compliance
+spec:
+  displayName: "SharePoint Compliance Processing Alerts"
+  conditions:
+    - displayName: "High Error Rate"
+      conditionThreshold:
+        filter: 'metric.type="cloudfunctions.googleapis.com/function/execution_count" resource.type="cloud_function" metric.label.status="error"'
+        comparison: COMPARISON_GT
+        thresholdValue: 5
+        duration: 300s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_RATE
+        trigger:
+          count: 1
+    
+    - displayName: "Processing Failure"
+      conditionThreshold:
+        filter: 'metric.type="cloudfunctions.googleapis.com/function/execution_count" resource.type="cloud_function" metric.label.status="error"'
+        comparison: COMPARISON_GT
+        thresholdValue: 0
+        duration: 60s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_RATE
+        trigger:
+          count: 1
+    
+    - displayName: "Long Processing Time"
+      conditionThreshold:
+        filter: 'metric.type="cloudfunctions.googleapis.com/function/execution_times" resource.type="cloud_function"'
+        comparison: COMPARISON_GT
+        thresholdValue: 300000  # 5 minutes
+        duration: 300s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_PERCENTILE_95
+        trigger:
+          count: 1
+  
+  notificationChannels:
+    - projects/PROJECT_ID/notificationChannels/EMAIL_CHANNEL_ID  # Replace with actual channel ID
+  
+  documentation:
+    content: |
+      SharePoint Compliance Processing Alerts
+      
+      **High Error Rate**: More than 5 errors in the last 5 minutes
+      **Processing Failure**: Any execution error detected
+      **Long Processing Time**: Processing takes longer than 5 minutes
+      
+      **Troubleshooting Steps**:
+      1. Check Cloud Function logs
+      2. Verify SharePoint connectivity
+      3. Check Secret Manager secrets
+      4. Verify Splunk HEC (if configured)
+      
+      **Logs**: gcloud functions logs read sharepoint-compliance-processor --region us-central1
+
+---
+# Log-Based Metrics
+apiVersion: logging/v2
+kind: LogMetric
+metadata:
+  name: sharepoint_compliance_records_processed
+  labels:
+    app: sharepoint-compliance
+spec:
+  name: sharepoint_compliance_records_processed
+  description: "Number of compliance records processed"
+  filter: 'resource.type="cloud_function" AND resource.labels.function_name="sharepoint-compliance-processor" AND jsonPayload.message="✅ Generated * compliance records"'
+  metricDescriptor:
+    type: custom.googleapis.com/sharepoint_compliance/records_processed
+    metricKind: GAUGE
+    valueType: INT64
+    unit: "1"
+  labelExtractors:
+    records_count: 'EXTRACT(jsonPayload.message, "Generated (.+) compliance records")'
+
+---
+apiVersion: logging/v2
+kind: LogMetric
+metadata:
+  name: sharepoint_compliance_splunk_sent
+  labels:
+    app: sharepoint-compliance
+spec:
+  name: sharepoint_compliance_splunk_sent
+  description: "Number of events sent to Splunk"
+  filter: 'resource.type="cloud_function" AND resource.labels.function_name="sharepoint-compliance-processor" AND jsonPayload.message="✅ Sent * events to Splunk"'
+  metricDescriptor:
+    type: custom.googleapis.com/sharepoint_compliance/splunk_sent
+    metricKind: GAUGE
+    valueType: INT64
+    unit: "1"
+  labelExtractors:
+    events_count: 'EXTRACT(jsonPayload.message, "✅ Sent (.+) events to Splunk")'

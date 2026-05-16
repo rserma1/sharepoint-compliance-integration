@@ -1,0 +1,285 @@
+name: Deploy SharePoint Compliance Processor (TEST)
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'sharepoint-integration/gcp/**'
+      - 'sharepoint-integration/sharepoint_client.py'
+      - 'sharepoint-integration/splunk_client.py'
+  workflow_dispatch:
+    inputs:
+      deploy_mode:
+        description: 'Deployment mode'
+        required: true
+        default: 'test'
+        type: choice
+        options:
+        - test
+        - production
+      use_seed_data:
+        description: 'Use seed data for testing'
+        required: true
+        default: true
+        type: boolean
+      num_records:
+        description: 'Number of test records to generate'
+        required: false
+        default: '100'
+        type: string
+
+env:
+  PROJECT_ID: pmops-docai-dev-e93d
+  REGION: us-central1
+  FUNCTION_NAME: sharepoint-compliance-processor-test
+  BUCKET_NAME: product-compliance-data-pmops-docai-dev-e93d
+  USE_SEED_DATA: ${{ github.event.inputs.use_seed_data || 'true' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        cd sharepoint-integration/gcp
+        pip install -r requirements.txt
+    
+    - name: Test seed data generation
+      run: |
+        cd sharepoint-integration/gcp
+        python seed_data.py
+    
+    - name: Validate test function
+      run: |
+        cd sharepoint-integration/gcp
+        python -c "import main_test; print('✅ Test function import successful')"
+
+  deploy-test:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Authenticate to GCP
+      uses: google-github-actions/auth@v0
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+    
+    - name: Setup GCP
+      uses: google-github-actions/setup-gcloud@v0
+      with:
+        project_id: ${{ env.PROJECT_ID }}
+        service_account_key: ${{ secrets.GCP_SA_KEY }}
+    
+    - name: Use GCP CLI
+      run: |
+        gcloud info
+        gcloud config set project ${{ env.PROJECT_ID }}
+        gcloud config set compute/region ${{ env.REGION }}
+    
+    - name: Enable APIs
+      run: |
+        gcloud services enable \
+          cloudfunctions.googleapis.com \
+          cloudscheduler.googleapis.com \
+          secretmanager.googleapis.com \
+          storage.googleapis.com \
+          logging.googleapis.com \
+          monitoring.googleapis.com \
+          cloudbuild.googleapis.com
+    
+    - name: Create Service Account
+      run: |
+        SA_EMAIL="${{ env.FUNCTION_NAME }}@${{ env.PROJECT_ID }}.iam.gserviceaccount.com"
+        
+        if ! gcloud iam service-accounts describe $SA_EMAIL &>/dev/null; then
+          gcloud iam service-accounts create ${{ env.FUNCTION_NAME }} \
+            --display-name="SharePoint Compliance Processor (Test)" \
+            --description="Service account for SharePoint compliance data processing (test)"
+        fi
+        
+        # Grant permissions
+        gcloud projects add-iam-policy-binding ${{ env.PROJECT_ID }} \
+          --member="serviceAccount:$SA_EMAIL" \
+          --role="roles/secretmanager.secretAccessor"
+        
+        gcloud projects add-iam-policy-binding ${{ env.PROJECT_ID }} \
+          --member="serviceAccount:$SA_EMAIL" \
+          --role="roles/storage.objectAdmin"
+        
+        gcloud projects add-iam-policy-binding ${{ env.PROJECT_ID }} \
+          --member="serviceAccount:$SA_EMAIL" \
+          --role="roles/logging.logWriter"
+        
+        gcloud projects add-iam-policy-binding ${{ env.PROJECT_ID }} \
+          --member="serviceAccount:$SA_EMAIL" \
+          --role="roles/monitoring.metricWriter"
+    
+    - name: Setup Test Secrets (Mock)
+      run: |
+        # Create mock secrets for testing
+        echo "test-client-secret-for-testing" | gcloud secrets create sharepoint-compliance-client-secret --data-file=- 2>/dev/null || echo "Secret already exists"
+        echo "test-tenant-id-for-testing" | gcloud secrets create sharepoint-compliance-tenant-id --data-file=- 2>/dev/null || echo "Secret already exists"
+        echo "test-stack.splunkcloud.com" | gcloud secrets create sharepoint-compliance-splunk-host --data-file=- 2>/dev/null || echo "Secret already exists"
+        echo "test-hec-token-for-testing" | gcloud secrets create sharepoint-compliance-splunk-token --data-file=- 2>/dev/null || echo "Secret already exists"
+        
+        echo "✅ Test secrets created"
+    
+    - name: Create Storage Bucket
+      run: |
+        if ! gsutil ls "gs://${{ env.BUCKET_NAME }}" &>/dev/null; then
+          gsutil mb -l ${{ env.REGION }} "gs://${{ env.BUCKET_NAME }}"
+        fi
+    
+    - name: Deploy Test Cloud Function
+      run: |
+        cd sharepoint-integration/gcp
+        
+        # Copy test function to main.py for deployment
+        cp main_test.py main.py
+        
+        gcloud functions deploy ${{ env.FUNCTION_NAME }} \
+          --runtime python39 \
+          --region ${{ env.REGION }} \
+          --trigger-http \
+          --entry-point process_sharepoint_compliance_test \
+          --source . \
+          --service-account "${{ env.FUNCTION_NAME }}@${{ env.PROJECT_ID }}.iam.gserviceaccount.com" \
+          --timeout 540s \
+          --memory 1024MiB \
+          --set-env-vars="GCP_PROJECT=${{ env.PROJECT_ID }},GCS_BUCKET=${{ env.BUCKET_NAME }},SECRET_PREFIX=sharepoint-compliance,USE_SEED_DATA=${{ env.USE_SEED_DATA }}"
+    
+    - name: Deploy Seed Data Generator
+      run: |
+        cd sharepoint-integration/gcp
+        
+        gcloud functions deploy sharepoint-seed-generator \
+          --runtime python39 \
+          --region ${{ env.REGION }} \
+          --trigger-http \
+          --entry-point generate_seed_data_endpoint \
+          --source . \
+          --service-account "${{ env.FUNCTION_NAME }}@${{ env.PROJECT_ID }}.iam.gserviceaccount.com" \
+          --timeout 540s \
+          --memory 1024MiB \
+          --set-env-vars="GCP_PROJECT=${{ env.PROJECT_ID }},GCS_BUCKET=${{ env.BUCKET_NAME }}"
+    
+    - name: Create Cloud Scheduler
+      run: |
+        FUNCTION_URL=$(gcloud functions describe ${{ env.FUNCTION_NAME }} --region ${{ env.REGION }} --format='value(httpsUrl)')
+        SA_EMAIL="${{ env.FUNCTION_NAME }}@${{ env.PROJECT_ID }}.iam.gserviceaccount.com"
+        
+        # Delete existing job if it exists
+        gcloud scheduler jobs delete ${{ env.FUNCTION_NAME }}-scheduler --location ${{ env.REGION }} &>/dev/null || true
+        
+        gcloud scheduler jobs create http ${{ env.FUNCTION_NAME }}-scheduler \
+          --schedule "0 6 * * *" \
+          --http-method POST \
+          --uri "$FUNCTION_URL" \
+          --oidc-service-account-email "$SA_EMAIL" \
+          --time-zone UTC \
+          --description="Daily SharePoint compliance data processing (test)"
+    
+    - name: Test Deployment
+      run: |
+        FUNCTION_URL=$(gcloud functions describe ${{ env.FUNCTION_NAME }} --region ${{ env.REGION }} --format='value(httpsUrl)')
+        
+        echo "🧪 Testing function at: $FUNCTION_URL"
+        
+        # Wait for function to be ready
+        sleep 30
+        
+        # Test the function
+        RESPONSE=$(curl -s -X POST "$FUNCTION_URL" -H "Content-Type: application/json" -d '{}')
+        echo "Function response: $RESPONSE"
+        
+        # Check if response contains success
+        if echo "$RESPONSE" | grep -q '"status":"success"'; then
+          echo "✅ Function test passed"
+        else
+          echo "❌ Function test failed"
+          echo "Response: $RESPONSE"
+          exit 1
+        fi
+        
+        # Test seed data generator
+        SEED_URL=$(gcloud functions describe sharepoint-seed-generator --region ${{ env.REGION }} --format='value(httpsUrl)')
+        echo "🧪 Testing seed generator at: $SEED_URL"
+        
+        SEED_RESPONSE=$(curl -s -X POST "$SEED_URL" -H "Content-Type: application/json" -d '{"num_records": 25}')
+        echo "Seed generator response: $SEED_RESPONSE"
+        
+        if echo "$SEED_RESPONSE" | grep -q '"status":"success"'; then
+          echo "✅ Seed generator test passed"
+        else
+          echo "⚠️ Seed generator test may have failed"
+        fi
+    
+    - name: Output Deployment Info
+      run: |
+        FUNCTION_URL=$(gcloud functions describe ${{ env.FUNCTION_NAME }} --region ${{ env.REGION }} --format='value(httpsUrl)')
+        SEED_URL=$(gcloud functions describe sharepoint-seed-generator --region ${{ env.REGION }} --format='value(httpsUrl)')
+        
+        echo "🎉 Test Deployment Complete!"
+        echo "=========================================="
+        echo "Main Function URL: $FUNCTION_URL"
+        echo "Seed Generator URL: $SEED_URL"
+        echo "Project ID: ${{ env.PROJECT_ID }}"
+        echo "Region: ${{ env.REGION }}"
+        echo "Bucket: gs://${{ env.BUCKET_NAME }}"
+        echo "Mode: ${{ env.USE_SEED_DATA }}"
+        echo "=========================================="
+        echo ""
+        echo "📊 Monitoring:"
+        echo "  • Console: https://console.cloud.google.com/home/dashboard?project=${{ env.PROJECT_ID }}"
+        echo "  • Functions: https://console.cloud.google.com/functions/list?project=${{ env.PROJECT_ID }}"
+        echo "  • Storage: https://console.cloud.google.com/storage/browser/${{ env.BUCKET_NAME }}"
+        echo ""
+        echo "🔧 Test Commands:"
+        echo "  • Test main function: curl -X POST $FUNCTION_URL"
+        echo "  • Generate seed data: curl -X POST $SEED_URL -d '{\"num_records\": 50}'"
+        echo "  • View logs: gcloud functions logs read ${{ env.FUNCTION_NAME }} --region ${{ env.REGION }}"
+        echo "  • Check bucket: gsutil ls gs://${{ env.BUCKET_NAME }}"
+        echo ""
+        echo "📝 Next Steps:"
+        echo "  1. Test the functions manually"
+        echo "  2. Check generated CSV files in Cloud Storage"
+        echo "  3. Update secrets with real credentials when ready"
+        echo "  4. Deploy production version"
+        echo ""
+
+  update-credentials:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.deploy_mode == 'production'
+    needs: deploy-test
+    steps:
+    - name: Create Credential Update Guide
+      run: |
+        echo "📋 Credential Update Instructions:"
+        echo "=========================================="
+        echo ""
+        echo "To update from test to production:"
+        echo ""
+        echo "1. Update SharePoint secrets:"
+        echo "   gcloud secrets versions add sharepoint-compliance-client-secret --data-file=real-client-secret.txt"
+        echo "   gcloud secrets versions add sharepoint-compliance-tenant-id --data-file=real-tenant-id.txt"
+        echo ""
+        echo "2. Update Splunk secrets (optional):"
+        echo "   gcloud secrets versions add sharepoint-compliance-splunk-host --data-file=real-splunk-host.txt"
+        echo "   gcloud secrets versions add sharepoint-compliance-splunk-token --data-file=real-splunk-token.txt"
+        echo ""
+        echo "3. Redeploy with production settings:"
+        echo "   gcloud functions deploy sharepoint-compliance-processor \\"
+        echo "     --set-env-vars=\"USE_SEED_DATA=false\""
+        echo ""
+        echo "4. Test production deployment"
+        echo ""

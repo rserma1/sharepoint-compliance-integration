@@ -1,0 +1,293 @@
+stages:
+  - test
+  - deploy
+  - verify
+
+variables:
+  PROJECT_ID: pmops-docai-dev-e93d
+  REGION: us-central1
+  FUNCTION_NAME: sharepoint-compliance-processor
+  BUCKET_NAME: product-compliance-data-pmops-docai-dev-e93d
+
+test:
+  stage: test
+  image: python:3.9-slim
+  before_script:
+    - cd sharepoint-integration/gcp
+    - pip install -r requirements.txt
+  script:
+    - python -c "import main; print('✅ Import successful')"
+    - python -c "import sharepoint_client; print('✅ SharePoint client import successful')"
+    - python -c "import splunk_client; print('✅ Splunk client import successful')"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+      changes:
+        - "sharepoint-integration/gcp/**"
+        - "sharepoint-integration/sharepoint_client.py"
+        - "sharepoint-integration/splunk_client.py"
+
+deploy_gcp:
+  stage: deploy
+  image: google/cloud-sdk:latest
+  before_script:
+    - echo $GCP_SA_KEY > ~/gcp-key.json
+    - gcloud auth activate-service-account --key-file ~/gcp-key.json
+    - gcloud config set project $PROJECT_ID
+    - gcloud config set compute/region $REGION
+  script:
+    - echo "🚀 Starting deployment to GCP..."
+    
+    # Enable APIs
+    - gcloud services enable cloudfunctions.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com storage.googleapis.com logging.googleapis.com monitoring.googleapis.com cloudbuild.googleapis.com
+    
+    # Create service account
+    - |
+      SA_EMAIL="${FUNCTION_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+      if ! gcloud iam service-accounts describe $SA_EMAIL &>/dev/null; then
+        gcloud iam service-accounts create $FUNCTION_NAME \
+          --display-name="SharePoint Compliance Processor" \
+          --description="Service account for SharePoint compliance data processing"
+        echo "✅ Service account created: $SA_EMAIL"
+      else
+        echo "✅ Service account already exists: $SA_EMAIL"
+      fi
+    
+    # Grant permissions
+    - |
+      gcloud projects add-iam-policy-binding $PROJECT_ID \
+        --member="serviceAccount:$SA_EMAIL" \
+        --role="roles/secretmanager.secretAccessor"
+      
+      gcloud projects add-iam-policy-binding $PROJECT_ID \
+        --member="serviceAccount:$SA_EMAIL" \
+        --role="roles/storage.objectAdmin"
+      
+      gcloud projects add-iam-policy-binding $PROJECT_ID \
+        --member="serviceAccount:$SA_EMAIL" \
+        --role="roles/logging.logWriter"
+      
+      gcloud projects add-iam-policy-binding $PROJECT_ID \
+        --member="serviceAccount:$SA_EMAIL" \
+        --role="roles/monitoring.metricWriter"
+      
+      echo "✅ Service account permissions granted"
+    
+    # Setup secrets
+    - |
+      if [ -n "$SHAREPOINT_CLIENT_SECRET" ]; then
+        if ! gcloud secrets describe sharepoint-compliance-client-secret &>/dev/null; then
+          echo "$SHAREPOINT_CLIENT_SECRET" | gcloud secrets create sharepoint-compliance-client-secret --data-file=-
+          echo "✅ SharePoint client secret created"
+        else
+          echo "✅ SharePoint client secret already exists"
+        fi
+      else
+        echo "❌ SHAREPOINT_CLIENT_SECRET not set"
+        exit 1
+      fi
+      
+      if [ -n "$SHAREPOINT_TENANT_ID" ]; then
+        if ! gcloud secrets describe sharepoint-compliance-tenant-id &>/dev/null; then
+          echo "$SHAREPOINT_TENANT_ID" | gcloud secrets create sharepoint-compliance-tenant-id --data-file=-
+          echo "✅ SharePoint tenant ID created"
+        else
+          echo "✅ SharePoint tenant ID already exists"
+        fi
+      else
+        echo "❌ SHAREPOINT_TENANT_ID not set"
+        exit 1
+      fi
+      
+      # Optional Splunk secrets
+      if [ -n "$SPLUNK_HOST" ]; then
+        if ! gcloud secrets describe sharepoint-compliance-splunk-host &>/dev/null; then
+          echo "$SPLUNK_HOST" | gcloud secrets create sharepoint-compliance-splunk-host --data-file=-
+          echo "✅ Splunk host secret created"
+        fi
+      fi
+      
+      if [ -n "$SPLUNK_HEC_TOKEN" ]; then
+        if ! gcloud secrets describe sharepoint-compliance-splunk-token &>/dev/null; then
+          echo "$SPLUNK_HEC_TOKEN" | gcloud secrets create sharepoint-compliance-splunk-token --data-file=-
+          echo "✅ Splunk token secret created"
+        fi
+      fi
+    
+    # Create storage bucket
+    - |
+      if ! gsutil ls "gs://$BUCKET_NAME" &>/dev/null; then
+        gsutil mb -l $REGION "gs://$BUCKET_NAME"
+        echo "✅ Storage bucket created: gs://$BUCKET_NAME"
+      else
+        echo "✅ Storage bucket already exists: gs://$BUCKET_NAME"
+      fi
+    
+    # Deploy Cloud Function
+    - |
+      cd sharepoint-integration/gcp
+      
+      echo "📦 Deploying Cloud Function..."
+      gcloud functions deploy $FUNCTION_NAME \
+        --runtime python39 \
+        --region $REGION \
+        --trigger-http \
+        --entry-point process_sharepoint_compliance \
+        --source . \
+        --service-account "$SA_EMAIL" \
+        --timeout 540s \
+        --memory 1024MiB \
+        --set-env-vars="GCP_PROJECT=$PROJECT_ID,GCS_BUCKET=$BUCKET_NAME,SECRET_PREFIX=sharepoint-compliance"
+      
+      echo "✅ Cloud Function deployed"
+    
+    # Create Cloud Scheduler
+    - |
+      FUNCTION_URL=$(gcloud functions describe $FUNCTION_NAME --region $REGION --format='value(httpsUrl)')
+      
+      # Delete existing job if it exists
+      gcloud scheduler jobs delete $FUNCTION_NAME-scheduler --location $REGION &>/dev/null || true
+      
+      gcloud scheduler jobs create http $FUNCTION_NAME-scheduler \
+        --schedule "0 6 * * *" \
+        --http-method POST \
+        --uri "$FUNCTION_URL" \
+        --oidc-service-account-email "$SA_EMAIL" \
+        --time-zone UTC \
+        --description="Daily SharePoint compliance data processing"
+      
+      echo "✅ Cloud Scheduler job created"
+    
+    # Output deployment info
+    - |
+      echo "🎉 Deployment Complete!"
+      echo "=========================================="
+      echo "Function URL: $FUNCTION_URL"
+      echo "Project ID: $PROJECT_ID"
+      echo "Region: $REGION"
+      echo "Bucket: gs://$BUCKET_NAME"
+      echo "=========================================="
+      echo ""
+      echo "📊 Monitoring:"
+      echo "  • Logs: https://console.cloud.google.com/logs/viewer?project=$PROJECT_ID"
+      echo "  • Functions: https://console.cloud.google.com/functions/list?project=$PROJECT_ID"
+      echo "  • Storage: https://console.cloud.google.com/storage/browser/$BUCKET_NAME"
+      echo ""
+      echo "🔧 Management Commands:"
+      echo "  • View logs: gcloud functions logs read $FUNCTION_NAME --region $REGION"
+      echo "  • Test manually: curl -X POST $FUNCTION_URL"
+      echo "  • Update schedule: gcloud scheduler jobs update $FUNCTION_NAME-scheduler --schedule '0 8 * * *'"
+  
+  environment:
+    name: production
+    url: https://console.cloud.google.com/functions/list?project=$PROJECT_ID
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - "sharepoint-integration/gcp/**"
+        - "sharepoint-integration/sharepoint_client.py"
+        - "sharepoint-integration/splunk_client.py"
+
+verify_deployment:
+  stage: verify
+  image: google/cloud-sdk:latest
+  before_script:
+    - echo $GCP_SA_KEY > ~/gcp-key.json
+    - gcloud auth activate-service-account --key-file ~/gcp-key.json
+    - gcloud config set project $PROJECT_ID
+  script:
+    - |
+      FUNCTION_URL=$(gcloud functions describe $FUNCTION_NAME --region $REGION --format='value(httpsUrl)')
+      
+      echo "🧪 Testing deployment..."
+      echo "Function URL: $FUNCTION_URL"
+      
+      # Wait for function to be ready
+      sleep 30
+      
+      # Test the function
+      RESPONSE=$(curl -s -X POST "$FUNCTION_URL" -H "Content-Type: application/json" -d '{}')
+      echo "Function response: $RESPONSE"
+      
+      # Check if response contains success
+      if echo "$RESPONSE" | grep -q '"status":"success"'; then
+        echo "✅ Function test passed"
+      else
+        echo "❌ Function test failed"
+        echo "Response: $RESPONSE"
+        exit 1
+      fi
+      
+      # Check scheduler
+      SCHEDULER_STATUS=$(gcloud scheduler jobs describe $FUNCTION_NAME-scheduler --location $REGION --format='value(state)')
+      echo "Scheduler status: $SCHEDULER_STATUS"
+      
+      if [ "$SCHEDULER_STATUS" = "ENABLED" ]; then
+        echo "✅ Scheduler is enabled"
+      else
+        echo "❌ Scheduler is not enabled"
+        exit 1
+      fi
+      
+      # Check storage bucket
+      if gsutil ls "gs://$BUCKET_NAME" &>/dev/null; then
+        echo "✅ Storage bucket is accessible"
+      else
+        echo "❌ Storage bucket is not accessible"
+        exit 1
+      fi
+      
+      echo "🎉 All verification checks passed!"
+  
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: on_success
+  dependencies:
+    - deploy_gcp
+
+# Container deployment (alternative)
+deploy_container:
+  stage: deploy
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - echo $GCP_SA_KEY > ~/gcp-key.json
+    - cat ~/gcp-key.json | docker login -u _json_key --password-stdin https://us-central1-docker.pkg.dev
+  script:
+    - |
+      # Enable Artifact Registry
+      gcloud auth activate-service-account --key-file ~/gcp-key.json
+      gcloud config set project $PROJECT_ID
+      gcloud services enable artifactregistry.googleapis.com
+      
+      # Create repository
+      if ! gcloud artifacts repositories describe sharepoint-compliance --location=$REGION &>/dev/null; then
+        gcloud artifacts repositories create sharepoint-compliance \
+          --repository-format=docker \
+          --location=$REGION \
+          --description="SharePoint compliance processor images"
+      fi
+      
+      # Build and push image
+      cd sharepoint-integration/gcp
+      docker build -t us-central1-docker.pkg.dev/$PROJECT_ID/sharepoint-compliance/processor:latest .
+      docker push us-central1-docker.pkg.dev/$PROJECT_ID/sharepoint-compliance/processor:latest
+      
+      # Deploy to Cloud Run
+      gcloud run deploy sharepoint-compliance-processor \
+        --image us-central1-docker.pkg.dev/$PROJECT_ID/sharepoint-compliance/processor:latest \
+        --platform managed \
+        --region $REGION \
+        --allow-unauthenticated \
+        --memory 1Gi \
+        --timeout 15m \
+        --set-env-vars="GCP_PROJECT=$PROJECT_ID,GCS_BUCKET=$BUCKET_NAME,SECRET_PREFIX=sharepoint-compliance"
+      
+      echo "✅ Container deployment complete"
+  
+  environment:
+    name: container
+    url: https://console.cloud.google.com/run/list?project=$PROJECT_ID
+  rules:
+    - if: $DEPLOY_CONTAINER == "true"
+      when: manual
