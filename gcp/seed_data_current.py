@@ -13,8 +13,11 @@ import os
 def load_current_dataset() -> pd.DataFrame:
     """Load the current dataset from the CSV file"""
     try:
-        # Try to load from the current directory first
-        csv_path = '../Product_Compliance_Infra_Data.csv'
+        # In the GitHub Actions runner, the file is in the current directory.
+        csv_path = 'Product_Compliance_Infra_Data.csv'
+        if not os.path.exists(csv_path):
+            # For local execution, it might be in the parent directory.
+            csv_path = '../Product_Compliance_Infra_Data.csv'
         if not os.path.exists(csv_path):
             # Try alternative paths
             csv_path = '../../Product_Compliance_Infra_Data.csv'
