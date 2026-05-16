@@ -70,7 +70,7 @@ jobs:
     - name: Deploy Cloud Function
       working-directory: gcp
       run: |
-        cp main_test.py main.py
+        cp main_simple.py main.py
         
         gcloud functions deploy ${{ env.FUNCTION_NAME }} \
           --runtime=python311 \
@@ -80,9 +80,9 @@ jobs:
           --trigger-http \
           --allow-unauthenticated \
           --timeout=540s \
-          --memory=1024MiB \
+          --memory=512MiB \
           --service-account="${{ env.FUNCTION_NAME }}@${{ env.PROJECT_ID }}.iam.gserviceaccount.com" \
-          --set-env-vars="GCP_PROJECT=${{ env.PROJECT_ID }},GCS_BUCKET=${{ env.BUCKET_NAME }},SECRET_PREFIX=sharepoint-compliance,USE_SEED_DATA=true"
+          --set-env-vars="GCP_PROJECT=${{ env.PROJECT_ID }},GCS_BUCKET=${{ env.BUCKET_NAME }}"
     
     - name: Get Function URL
       run: |
