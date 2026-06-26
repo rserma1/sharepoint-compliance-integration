@@ -202,7 +202,7 @@ ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT}:role/${LAMBDA_ROLE_NAME}"
 FUNCTION_ARN="arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT}:function:${FUNCTION_NAME}"
 
 # Write env as JSON file to avoid shell-escaping issues with parentheses in sheet names
-LAMBDA_ENV_FILE=$(mktemp /tmp/lambda_rac_env_XXXXXX.json)
+LAMBDA_ENV_FILE=$(mktemp /tmp/lambda_rac_env_XXXXXX)
 python3 - <<PYEOF > "$LAMBDA_ENV_FILE"
 import json
 print(json.dumps({"Variables": {
