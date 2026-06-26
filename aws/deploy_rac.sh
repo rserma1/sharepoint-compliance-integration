@@ -246,6 +246,7 @@ else
     --environment "file://$LAMBDA_ENV_FILE" \
     --description "Syncs SharePoint Regional Availability data to Splunk HEC + S3 daily snapshots" \
     --output json > /dev/null
+  aws lambda wait function-active --function-name "$FUNCTION_NAME"
   echo "  Lambda function created"
 fi
 
