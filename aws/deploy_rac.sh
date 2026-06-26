@@ -240,8 +240,7 @@ else
     --runtime python3.11 \
     --role "$ROLE_ARN" \
     --handler lambda_function.lambda_handler \
-    --s3-bucket "$S3_LAMBDA_BUCKET" \
-    --s3-key "$S3_KEY" \
+    --code "S3Bucket=${S3_LAMBDA_BUCKET},S3Key=${S3_KEY}" \
     --timeout 300 \
     --memory-size 512 \
     --environment "file://$LAMBDA_ENV_FILE" \
