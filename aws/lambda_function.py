@@ -29,8 +29,13 @@ SECRET_PREFIX = os.environ.get("SECRET_PREFIX", "sharepoint-compliance")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 S3_DATA_BUCKET = os.environ.get("S3_DATA_BUCKET", "")
 DYNAMODB_CHANGES_TABLE = os.environ.get("DYNAMODB_CHANGES_TABLE", "sharepoint-compliance-changes")
+ACHIEVEMENTS_TABLE = os.environ.get("ACHIEVEMENTS_TABLE", "sharepoint-compliance-achievements")
 # First N columns are entity identifiers (Product, Feature, etc.); rest are cert status columns
 N_ENTITY_COLS = int(os.environ.get("N_ENTITY_COLS", "5"))
+# Column names for achievement record fields (matched case-insensitively against the Excel headers)
+PRODUCT_COL = os.environ.get("PRODUCT_COL", "Product")
+FEATURE_COL = os.environ.get("FEATURE_COL", "Feature")
+INFRA_COL   = os.environ.get("INFRA_COL", "Infrastructure")
 
 _QUARTER_RE = re.compile(r"Q[1-4]FY\d{2}", re.IGNORECASE)
 _COMPLIANT_VALS = {"✓", "✔", "yes", "compliant", "done", "complete", "completed"}
@@ -329,6 +334,78 @@ def save_changes_to_dynamodb(changes: list, table_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Achievement history  (On Roadmap -> Achieved/Compliant transitions only)
+# ---------------------------------------------------------------------------
+def _extract_achievement(change: dict) -> dict:
+    """
+    Build a clean achievement record from a roadmap-completion change.
+    Fields: product, feature, infrastructure, certification, original_expected_date.
+    """
+    # Column name lookup is case-insensitive to handle Excel header variations
+    col_lower = {k.lower(): k for k in change}
+    def _get(col_name):
+        return change.get(col_name) or change.get(col_lower.get(col_name.lower(), ""), "")
+
+    product       = _get(PRODUCT_COL)
+    feature       = _get(FEATURE_COL)
+    infrastructure = _get(INFRA_COL)
+    certification = change["cert_col"]
+
+    return {
+        "achievement_key":       f"{product}|{feature}|{certification}",
+        "achieved_date":         change["detected_date"],
+        "product":               product,
+        "feature":               feature,
+        "infrastructure":        infrastructure,
+        "certification":         certification,
+        "original_expected_date": change["from_quarter"],
+        "achieved_at":           change["detected_at"],
+    }
+
+
+def save_achievements_to_dynamodb(achievements: list, table_name: str) -> None:
+    """Batch-write achievement records to DynamoDB."""
+    if not achievements:
+        return
+    ddb = boto3.resource("dynamodb", region_name=AWS_REGION)
+    table = ddb.Table(table_name)
+    with table.batch_writer() as batch:
+        for rec in achievements:
+            item = {k: v for k, v in rec.items() if v != "" and v is not None}
+            batch.put_item(Item=item)
+    print(f"  {len(achievements)} achievement records saved to DynamoDB ({table_name})")
+
+
+def save_achievements_to_s3(achievements: list, bucket: str, run_date: datetime) -> Optional[str]:
+    """
+    Write today's achievements as a dated CSV under achievement-history/.
+    Only creates the file if there is at least one achievement.
+    """
+    if not achievements:
+        return None
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    key = (
+        f"achievement-history/year={run_date.strftime('%Y')}/"
+        f"month={run_date.strftime('%m')}/"
+        f"day={run_date.strftime('%d')}/"
+        f"achievements.csv"
+    )
+    fields = ["product", "feature", "infrastructure", "certification",
+              "original_expected_date", "achieved_date", "achieved_at"]
+    rows = [",".join(fields)]
+    for rec in achievements:
+        rows.append(",".join(f'"{rec.get(f, "")}"' for f in fields))
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body="\n".join(rows).encode(),
+        ContentType="text/csv",
+    )
+    print(f"  Achievement history saved: s3://{bucket}/{key}")
+    return key
+
+
+# ---------------------------------------------------------------------------
 # Lambda handler
 # ---------------------------------------------------------------------------
 def lambda_handler(event, context):
@@ -369,8 +446,16 @@ def lambda_handler(event, context):
                 if prev_df is not None:
                     changes = detect_status_changes(prev_df, df, run_date)
                     changes_detected = len(changes)
-                    roadmap_completions = sum(1 for c in changes if c["is_roadmap_completion"])
                     save_changes_to_dynamodb(changes, DYNAMODB_CHANGES_TABLE)
+
+                    # Achievement history: on_roadmap -> compliant transitions only
+                    achievements = [
+                        _extract_achievement(c) for c in changes if c["is_roadmap_completion"]
+                    ]
+                    roadmap_completions = len(achievements)
+                    if achievements:
+                        save_achievements_to_dynamodb(achievements, ACHIEVEMENTS_TABLE)
+                        save_achievements_to_s3(achievements, S3_DATA_BUCKET, run_date)
 
                 update_latest_snapshot(df, S3_DATA_BUCKET)
             except Exception as exc:

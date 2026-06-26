@@ -26,6 +26,9 @@ S3_DATA_BUCKET="sharepoint-compliance-data-${AWS_ACCOUNT}"
 # DynamoDB table for status-change tracking
 DYNAMODB_TABLE="sharepoint-compliance-changes"
 
+# DynamoDB table for achievement history (roadmap -> compliant transitions)
+ACHIEVEMENTS_TABLE="sharepoint-compliance-achievements"
+
 # Secrets (read from local .env)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/../.env"
@@ -123,7 +126,9 @@ DATA_POLICY="{
       ],
       \"Resource\": [
         \"arn:aws:dynamodb:${AWS_REGION}:${AWS_ACCOUNT}:table/${DYNAMODB_TABLE}\",
-        \"arn:aws:dynamodb:${AWS_REGION}:${AWS_ACCOUNT}:table/${DYNAMODB_TABLE}/index/*\"
+        \"arn:aws:dynamodb:${AWS_REGION}:${AWS_ACCOUNT}:table/${DYNAMODB_TABLE}/index/*\",
+        \"arn:aws:dynamodb:${AWS_REGION}:${AWS_ACCOUNT}:table/${ACHIEVEMENTS_TABLE}\",
+        \"arn:aws:dynamodb:${AWS_REGION}:${AWS_ACCOUNT}:table/${ACHIEVEMENTS_TABLE}/index/*\"
       ]
     }
   ]
@@ -187,11 +192,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Create DynamoDB changes table (idempotent)
+# 5. Create DynamoDB tables (idempotent)
 # ---------------------------------------------------------------------------
-echo -e "\n[5/9] Setting up DynamoDB changes table..."
+echo -e "\n[5/9] Setting up DynamoDB tables..."
+
+# Changes table (all status transitions)
 if aws dynamodb describe-table --table-name "$DYNAMODB_TABLE" &>/dev/null; then
-  echo "  DynamoDB table already exists: $DYNAMODB_TABLE"
+  echo "  Table already exists: $DYNAMODB_TABLE"
 else
   aws dynamodb create-table \
     --table-name "$DYNAMODB_TABLE" \
@@ -212,11 +219,36 @@ else
     --billing-mode PAY_PER_REQUEST \
     --output json > /dev/null
 
-  echo "  Waiting for table to become active..."
   aws dynamodb wait table-exists --table-name "$DYNAMODB_TABLE"
-  echo "  DynamoDB table created: $DYNAMODB_TABLE"
-  echo "    Schema  : PK=item_key, SK=detected_date"
-  echo "    GSI     : date-index (PK=detected_date) for querying changes by date"
+  echo "  Created: $DYNAMODB_TABLE  (PK=item_key, SK=detected_date, GSI=date-index)"
+fi
+
+# Achievements table (on_roadmap -> compliant transitions only)
+if aws dynamodb describe-table --table-name "$ACHIEVEMENTS_TABLE" &>/dev/null; then
+  echo "  Table already exists: $ACHIEVEMENTS_TABLE"
+else
+  aws dynamodb create-table \
+    --table-name "$ACHIEVEMENTS_TABLE" \
+    --attribute-definitions \
+      "AttributeName=achievement_key,AttributeType=S" \
+      "AttributeName=achieved_date,AttributeType=S" \
+    --key-schema \
+      "AttributeName=achievement_key,KeyType=HASH" \
+      "AttributeName=achieved_date,KeyType=RANGE" \
+    --global-secondary-indexes '[{
+      "IndexName": "date-index",
+      "KeySchema": [
+        {"AttributeName": "achieved_date",   "KeyType": "HASH"},
+        {"AttributeName": "achievement_key", "KeyType": "RANGE"}
+      ],
+      "Projection": {"ProjectionType": "ALL"}
+    }]' \
+    --billing-mode PAY_PER_REQUEST \
+    --output json > /dev/null
+
+  aws dynamodb wait table-exists --table-name "$ACHIEVEMENTS_TABLE"
+  echo "  Created: $ACHIEVEMENTS_TABLE  (PK=achievement_key, SK=achieved_date, GSI=date-index)"
+  echo "    Fields: product, feature, infrastructure, certification, original_expected_date"
 fi
 
 # ---------------------------------------------------------------------------
@@ -267,7 +299,7 @@ echo "  Package uploaded to s3://${S3_LAMBDA_BUCKET}/${S3_KEY}"
 # Wait for role to be assumable (new roles need ~10s)
 sleep 10
 
-LAMBDA_ENV="Variables={SECRET_PREFIX=${SECRET_PREFIX},AWS_REGION_NAME=${AWS_REGION},S3_DATA_BUCKET=${S3_DATA_BUCKET},DYNAMODB_CHANGES_TABLE=${DYNAMODB_TABLE}}"
+LAMBDA_ENV="Variables={SECRET_PREFIX=${SECRET_PREFIX},AWS_REGION_NAME=${AWS_REGION},S3_DATA_BUCKET=${S3_DATA_BUCKET},DYNAMODB_CHANGES_TABLE=${DYNAMODB_TABLE},ACHIEVEMENTS_TABLE=${ACHIEVEMENTS_TABLE}}"
 
 FUNCTION_ARN="arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT}:function:${FUNCTION_NAME}"
 
@@ -384,19 +416,24 @@ fi
 echo ""
 echo "================================================================"
 echo "Deployment complete!"
-echo "  Function ARN  : $FUNCTION_ARN"
-echo "  Schedule      : $SCHEDULE_EXPRESSION (6 AM UTC daily)"
-echo "  S3 snapshots  : s3://${S3_DATA_BUCKET}/compliance-runs/year=YYYY/month=MM/day=DD/compliance.csv"
-echo "  S3 latest     : s3://${S3_DATA_BUCKET}/latest/compliance_latest.csv"
-echo "  DynamoDB      : ${DYNAMODB_TABLE} (GSI: date-index)"
+echo "  Function ARN      : $FUNCTION_ARN"
+echo "  Schedule          : $SCHEDULE_EXPRESSION (6 AM UTC daily)"
+echo ""
+echo "  S3 daily snapshots: s3://${S3_DATA_BUCKET}/compliance-runs/year=YYYY/month=MM/day=DD/compliance.csv"
+echo "  S3 latest baseline: s3://${S3_DATA_BUCKET}/latest/compliance_latest.csv"
+echo "  S3 achievements   : s3://${S3_DATA_BUCKET}/achievement-history/year=YYYY/month=MM/day=DD/achievements.csv"
+echo ""
+echo "  DynamoDB changes  : ${DYNAMODB_TABLE}     (PK=item_key, SK=detected_date)"
+echo "  DynamoDB achieved : ${ACHIEVEMENTS_TABLE} (PK=achievement_key, SK=achieved_date)"
+echo "    Fields: product, feature, infrastructure, certification, original_expected_date"
 echo ""
 echo "  Logs          : aws logs tail /aws/lambda/$FUNCTION_NAME --follow --profile $AWS_PROFILE"
 echo "  Manual invoke : aws lambda invoke --function-name $FUNCTION_NAME --payload '{}' --cli-binary-format raw-in-base64-out out.json --profile $AWS_PROFILE"
 echo ""
-echo "  Query changes by date:"
-echo "    aws dynamodb query --table-name $DYNAMODB_TABLE \\"
+echo "  Query achievements by date:"
+echo "    aws dynamodb query --table-name $ACHIEVEMENTS_TABLE \\"
 echo "      --index-name date-index \\"
-echo "      --key-condition-expression 'detected_date = :d' \\"
+echo "      --key-condition-expression 'achieved_date = :d' \\"
 echo "      --expression-attribute-values '{\":d\":{\"S\":\"2026-06-26\"}}' \\"
 echo "      --profile $AWS_PROFILE"
 echo "================================================================"
