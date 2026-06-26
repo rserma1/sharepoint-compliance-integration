@@ -25,8 +25,8 @@ from botocore.exceptions import ClientError
 # ---------------------------------------------------------------------------
 SHAREPOINT_SITE_PATH  = "cisco.sharepoint.com:/sites/Splunk-Product-Compliance"
 FILE_ID               = os.environ.get("RAC_FILE_ID", "F07872BA-6EA5-40D0-A837-4A6505B4F336")
-PRODUCT_SHEET_NAME    = os.environ.get("RAC_PRODUCT_SHEET", "Regional Availability (Product)")
-FEATURE_SHEET_NAME    = os.environ.get("RAC_FEATURE_SHEET", "Regional Availability (Feature)")
+PRODUCT_SHEET_NAME    = os.environ.get("RAC_PRODUCT_SHEET", "Regional Availability(Product)")
+FEATURE_SHEET_NAME    = os.environ.get("RAC_FEATURE_SHEET", "Regional Availability(Feature)")
 SECRET_PREFIX         = os.environ.get("SECRET_PREFIX", "sharepoint-compliance")
 AWS_REGION            = os.environ.get("AWS_REGION_NAME", os.environ.get("AWS_REGION", "us-east-1"))
 S3_DATA_BUCKET        = os.environ.get("S3_DATA_BUCKET", "")

@@ -26,8 +26,8 @@ S3_DATA_BUCKET="sharepoint-compliance-data-${AWS_ACCOUNT}"
 DYNAMODB_TABLE="sharepoint-rac-changes"
 
 # SharePoint sheet names — update these if the actual names differ
-RAC_PRODUCT_SHEET="Regional Availability (Product)"
-RAC_FEATURE_SHEET="Regional Availability (Feature)"
+RAC_PRODUCT_SHEET="Regional Availability(Product)"
+RAC_FEATURE_SHEET="Regional Availability(Feature)"
 
 # SharePoint File ID — update if RAC data lives in a different workbook
 # Defaults to the same compliance workbook; set RAC_FILE_ID env var to override
