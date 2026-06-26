@@ -201,7 +201,20 @@ echo "  Package uploaded to s3://${S3_LAMBDA_BUCKET}/${S3_KEY}"
 ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT}:role/${LAMBDA_ROLE_NAME}"
 FUNCTION_ARN="arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT}:function:${FUNCTION_NAME}"
 
-LAMBDA_ENV="Variables={SECRET_PREFIX=${SECRET_PREFIX},AWS_REGION_NAME=${AWS_REGION},S3_DATA_BUCKET=${S3_DATA_BUCKET},RAC_DYNAMODB_CHANGES_TABLE=${DYNAMODB_TABLE},RAC_FILE_ID=${RAC_FILE_ID},RAC_PRODUCT_SHEET=${RAC_PRODUCT_SHEET},RAC_FEATURE_SHEET=${RAC_FEATURE_SHEET}}"
+# Write env as JSON file to avoid shell-escaping issues with parentheses in sheet names
+LAMBDA_ENV_FILE=$(mktemp /tmp/lambda_rac_env_XXXXXX.json)
+python3 - <<PYEOF > "$LAMBDA_ENV_FILE"
+import json
+print(json.dumps({"Variables": {
+    "SECRET_PREFIX":             "${SECRET_PREFIX}",
+    "AWS_REGION_NAME":           "${AWS_REGION}",
+    "S3_DATA_BUCKET":            "${S3_DATA_BUCKET}",
+    "RAC_DYNAMODB_CHANGES_TABLE": "${DYNAMODB_TABLE}",
+    "RAC_FILE_ID":               "${RAC_FILE_ID}",
+    "RAC_PRODUCT_SHEET":         "${RAC_PRODUCT_SHEET}",
+    "RAC_FEATURE_SHEET":         "${RAC_FEATURE_SHEET}",
+}}))
+PYEOF
 
 if aws lambda get-function --function-name "$FUNCTION_NAME" &>/dev/null; then
   aws lambda update-function-code \
@@ -217,7 +230,7 @@ if aws lambda get-function --function-name "$FUNCTION_NAME" &>/dev/null; then
     --function-name "$FUNCTION_NAME" \
     --timeout 300 \
     --memory-size 512 \
-    --environment "$LAMBDA_ENV" \
+    --environment "file://$LAMBDA_ENV_FILE" \
     --output json > /dev/null
   echo "  Lambda configuration updated"
 else
@@ -231,7 +244,7 @@ else
     --s3-key "$S3_KEY" \
     --timeout 300 \
     --memory-size 512 \
-    --environment "$LAMBDA_ENV" \
+    --environment "file://$LAMBDA_ENV_FILE" \
     --description "Syncs SharePoint Regional Availability data to Splunk HEC + S3 daily snapshots" \
     --output json > /dev/null
   echo "  Lambda function created"
